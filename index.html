@@ -1,358 +1,834 @@
-"""
-Coloring Book Generator for Amazon KDP
-========================================
-Generates, for any ORIGINAL creature/animal concept you name, a 3-page set:
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Color-by-Number Template Generator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-  1. reference.png     - full-color reference image (small "answer key" thumbnail)
-  2. coloring_page.png - clean black-and-white line art, ready to color
-  3. color_by_number.png - line art with numbered regions + a color-key legend
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
 
-Supports three styles: "cute", "standard", "pixel".
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
 
-IMPORTANT / LEGAL NOTE
------------------------
-Do NOT pass in copyrighted characters (Pokemon, Disney, etc.) — this tool is
-built for ORIGINAL creature concepts you invent (e.g. "round fire lizard with
-big ears") or real, non-trademarked animals (e.g. "axolotl", "capybara").
-Generating and selling images of existing copyrighted characters is
-infringement regardless of how the image was produced.
+        .header {
+            background: linear-gradient(135deg, #ff6b6b, #ffa726);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
 
-Setup
------
-    pip install openai pillow numpy scikit-learn
-    export OPENAI_API_KEY="sk-..."
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
 
-Usage
------
-    python coloring_book_gen.py --name "round fire lizard, big ears, chubby tail" \
-                                 --style cute --out ./output
+        .main {
+            padding: 30px;
+        }
 
-    # or import and call generate_page_set() directly, e.g. in a loop over
-    # a CSV of 50 creature concepts to batch-produce a whole book.
-"""
+        .section {
+            margin-bottom: 30px;
+            padding: 25px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 5px solid #667eea;
+        }
 
-import argparse
-import base64
-import io
-import os
-from dataclasses import dataclass
-from pathlib import Path
+        .section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
 
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from sklearn.cluster import KMeans
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: white;
+        }
 
-# ---------------------------------------------------------------------------
-# 1. STYLE PROMPTS
-# ---------------------------------------------------------------------------
-# Each style has a "reference" prompt (full color) and a "lineart" prompt
-# (pure black-and-white outline, print-ready). Keeping these separate and
-# asking the model for line art DIRECTLY gives far cleaner, closed outlines
-# than trying to edge-detect a photo-real image after the fact.
+        .upload-area:hover {
+            border-color: #ff6b6b;
+            background: #f0f8ff;
+        }
 
-STYLE_PROMPTS = {
-    "cute": {
-        "reference": (
-            "A single adorable chibi-style creature: {concept}. Big round eyes, "
-            "soft rounded body, kawaii mascot style, simple flat colors, "
-            "centered on a plain white background, full body visible, "
-            "children's book illustration style, no text, no watermark."
-        ),
-        "lineart": (
-            "Black and white line art coloring book page of a single adorable "
-            "chibi-style creature: {concept}. Big round eyes, soft rounded body, "
-            "kawaii mascot style. THICK bold clean outlines only, no shading, "
-            "no gray fill, no color, pure white background, all lines closed "
-            "and connected, centered, full body visible, simple enough for a "
-            "child to color, no text, no watermark."
-        ),
-    },
-    "standard": {
-        "reference": (
-            "A single creature illustrated in a natural, semi-realistic "
-            "children's-encyclopedia style: {concept}. Balanced proportions, "
-            "detailed but clean, standing pose, centered on a plain white "
-            "background, full body visible, no text, no watermark."
-        ),
-        "lineart": (
-            "Black and white line art coloring book page, semi-realistic "
-            "encyclopedia illustration style, of a single creature: {concept}. "
-            "Clean medium-weight outlines, moderate detail (texture lines for "
-            "fur/scales/feathers where relevant), no shading, no gray fill, "
-            "no color, pure white background, all lines closed and connected, "
-            "centered, full body visible, no text, no watermark."
-        ),
-    },
-    "pixel": {
-        "reference": (
-            "A single creature in 16-bit retro pixel art style: {concept}. "
-            "Crisp pixel blocks, limited retro color palette, centered on a "
-            "plain white background, full sprite visible, no anti-aliasing "
-            "blur, no text, no watermark."
-        ),
-        "lineart": (
-            "Black and white pixel-grid coloring book page of a single "
-            "creature in 16-bit retro pixel art style: {concept}. Each pixel "
-            "block outlined with bold black borders (like a pixel-art "
-            "cross-stitch pattern), no shading, no gray fill, no color, pure "
-            "white background, centered, full sprite visible, no text, no "
-            "watermark."
-        ),
-    },
-}
+        .upload-area.dragover {
+            border-color: #ff6b6b;
+            background: #fff0f0;
+            transform: scale(1.02);
+        }
 
-VALID_STYLES = tuple(STYLE_PROMPTS.keys())
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
 
+        .control-group {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
 
-# ---------------------------------------------------------------------------
-# 2. IMAGE GENERATION (OpenAI gpt-image-1)
-# ---------------------------------------------------------------------------
+        .control-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
 
-def _get_openai_client():
-    """Lazy import so the rest of the script (line-art processing, etc.)
-    can be tested/used without the openai package installed."""
-    try:
-        from openai import OpenAI
-    except ImportError as e:
-        raise ImportError(
-            "The 'openai' package is required for image generation. "
-            "Install it with: pip install openai"
-        ) from e
-    return OpenAI()  # reads OPENAI_API_KEY from env
+        .slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 4px;
+            background: #ddd;
+            outline: none;
+            -webkit-appearance: none;
+        }
 
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #667eea;
+            cursor: pointer;
+        }
 
-def generate_image(prompt: str, size: str = "1024x1024") -> Image.Image:
-    """Calls the OpenAI image API and returns a PIL Image."""
-    client = _get_openai_client()
-    result = client.images.generate(
-        model="gpt-image-1",
-        prompt=prompt,
-        size=size,
-        n=1,
-    )
-    image_b64 = result.data[0].b64_json
-    image_bytes = base64.b64decode(image_b64)
-    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        .btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            margin: 5px;
+        }
 
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
 
-def generate_reference_image(concept: str, style: str) -> Image.Image:
-    prompt = STYLE_PROMPTS[style]["reference"].format(concept=concept)
-    return generate_image(prompt)
+        .btn-primary {
+            background: linear-gradient(135deg, #ff6b6b, #ffa726);
+        }
 
+        .btn-secondary {
+            background: linear-gradient(135deg, #4ecdc4, #44a08d);
+        }
 
-def generate_lineart_image(concept: str, style: str) -> Image.Image:
-    prompt = STYLE_PROMPTS[style]["lineart"].format(concept=concept)
-    return generate_image(prompt)
+        .preview-area {
+            display: flex;
+            gap: 20px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
 
+        .preview-box {
+            flex: 1;
+            min-width: 300px;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
 
-# ---------------------------------------------------------------------------
-# 3. COLOR-BY-NUMBER GENERATION
-# ---------------------------------------------------------------------------
-# Strategy: quantize the REFERENCE image's colors into K clusters with
-# k-means, then for each region of the LINE ART (flood-filled by the
-# nearest-cluster color at that pixel location, scaled to line-art size),
-# stamp a number in the region centroid. This keeps the "answer" colors
-# tied to the actual reference art rather than guessing.
+        .canvas-container {
+            text-align: center;
+            margin: 20px 0;
+        }
 
-@dataclass
-class PaletteEntry:
-    number: int
-    rgb: tuple
+        canvas {
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            max-width: 100%;
+            height: auto;
+        }
 
+        .color-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 20px 0;
+        }
 
-def quantize_palette(reference_img: Image.Image, k: int = 12) -> tuple:
-    """Returns (label_grid, palette) where label_grid is a 2D array of
-    cluster indices matching reference_img's pixel grid (downsampled for
-    speed), and palette is a list of PaletteEntry."""
-    small = reference_img.resize((256, 256))
-    arr = np.array(small).reshape(-1, 3)
+        .color-item {
+            display: flex;
+            align-items: center;
+            background: white;
+            padding: 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
 
-    km = KMeans(n_clusters=k, n_init=4, random_state=42)
-    labels = km.fit_predict(arr)
-    centers = km.cluster_centers_.astype(int)
+        .color-swatch {
+            width: 30px;
+            height: 30px;
+            border-radius: 4px;
+            margin-right: 10px;
+            border: 2px solid #ccc;
+        }
 
-    label_grid = labels.reshape(256, 256)
-    palette = [PaletteEntry(number=i + 1, rgb=tuple(centers[i])) for i in range(k)]
-    return label_grid, palette
+        .download-section {
+            background: linear-gradient(135deg, #a8edea, #fed6e3);
+            padding: 25px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
 
+        .download-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            justify-content: center;
+        }
 
-def _region_centroids(label_grid: np.ndarray, k: int, min_area: int = 60):
-    """For each cluster label, find connected-component centroids big
-    enough to hold a number (using scikit-image so a color that appears in
-    multiple separate body parts gets a number in each part)."""
-    from skimage import measure
+        .hidden {
+            display: none;
+        }
 
-    centroids_by_label = {}
-    for label_id in range(k):
-        mask = (label_grid == label_id).astype(np.uint8)
-        labeled_regions = measure.label(mask, connectivity=2)
-        spots = []
-        for region in measure.regionprops(labeled_regions):
-            if region.area >= min_area:
-                cy, cx = region.centroid
-                spots.append((cx, cy))
-        centroids_by_label[label_id] = spots
-    return centroids_by_label
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
 
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
 
-def build_color_by_number(
-    lineart_img: Image.Image,
-    reference_img: Image.Image,
-    k: int = 12,
-    font_path: str = None,
-) -> Image.Image:
-    """Overlays numbers onto the line art page + returns it. Call
-    build_palette_legend() separately for the printable color key."""
-    label_grid, palette = quantize_palette(reference_img, k=k)
-    centroids_by_label = _region_centroids(label_grid, k)
+        @media (max-width: 768px) {
+            .preview-area {
+                flex-direction: column;
+            }
 
-    canvas = lineart_img.convert("RGB").copy()
-    w, h = canvas.size
-    draw = ImageDraw.Draw(canvas)
+            .controls {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎨 Color-by-Number Generator</h1>
+            <p>Transform any image into professional numbered grid templates</p>
+        </div>
 
-    try:
-        font = ImageFont.truetype(font_path or "DejaVuSans-Bold.ttf", 18)
-    except OSError:
-        font = ImageFont.load_default()
+        <div class="main">
+            <!-- Upload Section -->
+            <div class="section" id="uploadSection">
+                <h2>1. Upload Your Image</h2>
+                <div class="upload-area" id="uploadArea">
+                    <div style="font-size: 48px; margin-bottom: 20px;">📸</div>
+                    <p style="font-size: 18px; margin-bottom: 10px;">Drag & Drop your image here</p>
+                    <p style="color: #666;">or click to browse files</p>
+                    <p style="color: #999; font-size: 12px; margin-top: 10px;">Supports: JPG, PNG, GIF, WebP</p>
+                </div>
+                <input type="file" id="imageInput" accept="image/*" class="hidden">
 
-    grid_size = label_grid.shape[0]  # 256
-    for label_id, spots in centroids_by_label.items():
-        number = label_id + 1
-        for (cx, cy) in spots:
-            # map from 256x256 grid coords -> full canvas coords
-            px = int(cx / grid_size * w)
-            py = int(cy / grid_size * h)
-            text = str(number)
-            bbox = draw.textbbox((0, 0), text, font=font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            draw.text((px - tw / 2, py - th / 2), text, fill=(0, 0, 0), font=font)
+                <div id="imagePreview" class="hidden" style="margin-top: 20px; text-align: center;">
+                    <img id="previewImg" style="max-width: 300px; max-height: 300px; border-radius: 8px;">
+                    <br><br>
+                    <button class="btn btn-secondary" id="changeImageBtn">Change Image</button>
+                </div>
+            </div>
 
-    return canvas, palette
+            <!-- Controls Section -->
+            <div class="section hidden" id="controlsSection">
+                <h2>2. Customize Your Template</h2>
+                <div class="controls">
+                    <div class="control-group">
+                        <label for="tileSizeSlider">Grid Size: <span id="tileSizeValue">12</span>px</label>
+                        <input type="range" id="tileSizeSlider" class="slider" min="8" max="24" value="12">
+                        <small>Smaller = More detail, Larger = Simpler design</small>
+                    </div>
 
+                    <div class="control-group">
+                        <label for="colorCountSlider">Number of Colors: <span id="colorCountValue">8</span></label>
+                        <input type="range" id="colorCountSlider" class="slider" min="4" max="16" value="8">
+                        <small>Fewer colors = Easier to color</small>
+                    </div>
 
-def build_palette_legend(palette, swatch_size: int = 40, per_row: int = 4) -> Image.Image:
-    """Small printable legend: number + color swatch, e.g. to print at the
-    bottom of the color-by-number page or on a separate key page."""
-    rows = (len(palette) + per_row - 1) // per_row
-    width = per_row * (swatch_size * 3)
-    height = rows * (swatch_size + 10)
-    legend = Image.new("RGB", (width, height), "white")
-    draw = ImageDraw.Draw(legend)
+                    <div class="control-group">
+                        <label for="minRegionSlider">Minimum Region Size: <span id="minRegionValue">4</span></label>
+                        <input type="range" id="minRegionSlider" class="slider" min="1" max="10" value="4">
+                        <small>Remove tiny isolated areas</small>
+                    </div>
 
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
-    except OSError:
-        font = ImageFont.load_default()
+                    <div class="control-group">
+                        <label for="gridLineSlider">Grid Line Thickness: <span id="gridLineValue">1</span>px</label>
+                        <input type="range" id="gridLineSlider" class="slider" min="1" max="3" value="1">
+                        <small>Thicker lines = Clearer cell boundaries</small>
+                    </div>
+                </div>
 
-    for entry in palette:
-        idx = entry.number - 1
-        row, col = divmod(idx, per_row)
-        x0 = col * swatch_size * 3
-        y0 = row * (swatch_size + 10)
-        draw.rectangle([x0, y0, x0 + swatch_size, y0 + swatch_size],
-                        fill=entry.rgb, outline="black")
-        draw.text((x0 + swatch_size + 8, y0 + swatch_size // 3),
-                   str(entry.number), fill="black", font=font)
-    return legend
+                <div style="text-align: center; margin-top: 20px;">
+                    <button class="btn btn-primary" id="processBtn">🎨 Generate Template</button>
+                </div>
+            </div>
 
+            <!-- Processing Section -->
+            <div class="section hidden" id="processingSection">
+                <h2>Processing Your Image...</h2>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                <p id="progressText">Initializing...</p>
+            </div>
 
-# ---------------------------------------------------------------------------
-# 4. CORNER REFERENCE THUMBNAIL (compositing)
-# ---------------------------------------------------------------------------
+            <!-- Results Section -->
+            <div class="section hidden" id="resultsSection">
+                <h2>3. Your Color-by-Number Template</h2>
 
-def add_corner_thumbnail(
-    base_page: Image.Image,
-    reference_img: Image.Image,
-    corner: str = "top-right",
-    scale: float = 0.18,
-    margin: int = 24,
-    border_width: int = 3,
-) -> Image.Image:
-    """Pastes a small full-color reference thumbnail into a corner of the
-    coloring/color-by-number page, with a thin border so it reads clearly
-    against the line art."""
-    page = base_page.convert("RGB").copy()
-    pw, ph = page.size
-    thumb_w = int(pw * scale)
-    thumb_h = int(thumb_w * reference_img.height / reference_img.width)
+                <div class="preview-area">
+                    <div class="preview-box">
+                        <h3>Numbered Template</h3>
+                        <div class="canvas-container">
+                            <canvas id="templateCanvas"></canvas>
+                        </div>
+                        <p style="color: #666; font-size: 14px;">This is what customers will color</p>
+                    </div>
 
-    thumb = reference_img.resize((thumb_w, thumb_h)).convert("RGB")
+                    <div class="preview-box">
+                        <h3>Color Reference</h3>
+                        <div class="canvas-container">
+                            <canvas id="coloredCanvas"></canvas>
+                        </div>
+                        <p style="color: #666; font-size: 14px;">Final result preview</p>
+                    </div>
+                </div>
 
-    bordered = Image.new(
-        "RGB", (thumb_w + border_width * 2, thumb_h + border_width * 2), "black"
-    )
-    bordered.paste(thumb, (border_width, border_width))
+                <div class="preview-box">
+                    <h3>Color Legend</h3>
+                    <div class="color-legend" id="colorLegend"></div>
+                    <p style="color: #666; font-size: 14px;">Color guide for the template</p>
+                </div>
 
-    bw, bh = bordered.size
-    positions = {
-        "top-right": (pw - bw - margin, margin),
-        "top-left": (margin, margin),
-        "bottom-right": (pw - bw - margin, ph - bh - margin),
-        "bottom-left": (margin, ph - bh - margin),
-    }
-    page.paste(bordered, positions[corner])
-    return page
+                <div class="download-section">
+                    <h3 style="text-align: center; margin-bottom: 20px;">📥 Download Your Templates</h3>
+                    <div class="download-buttons">
+                        <button class="btn btn-primary" id="downloadTemplate">📄 Download Template</button>
+                        <button class="btn btn-secondary" id="downloadColored">🎨 Download Answer Key</button>
+                        <button class="btn" id="downloadLegend">🏷️ Download Color Guide</button>
+                        <button class="btn" id="downloadAll">📦 Download All</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
+    <script>
+        class ColorByNumberGenerator {
+            constructor() {
+                this.originalImage = null;
+                this.settings = {
+                    tileSize: 12,
+                    colorCount: 8,
+                    minRegionSize: 4,
+                    gridLineThickness: 1
+                };
+                this.colorPalette = [];
+                this.mosaicData = null;
+                this.templateCanvas = null;
+                this.coloredCanvas = null;
 
-# ---------------------------------------------------------------------------
-# 5. FULL PIPELINE
-# ---------------------------------------------------------------------------
+                this.initializeElements();
+                this.setupEventListeners();
+                this.updateSliderValues();
+            }
 
-def generate_page_set(concept: str, style: str, out_dir: str, k_colors: int = 12):
-    """Generates and saves all deliverables for one creature concept:
-        {slug}_reference.png
-        {slug}_coloring_page.png          (line art, with corner ref thumbnail)
-        {slug}_color_by_number.png        (numbered line art, with corner ref thumbnail)
-        {slug}_palette_legend.png         (color key)
-    """
-    if style not in VALID_STYLES:
-        raise ValueError(f"style must be one of {VALID_STYLES}, got {style!r}")
+            initializeElements() {
+                // Upload elements
+                this.uploadArea = document.getElementById('uploadArea');
+                this.imageInput = document.getElementById('imageInput');
+                this.imagePreview = document.getElementById('imagePreview');
+                this.previewImg = document.getElementById('previewImg');
+                this.changeImageBtn = document.getElementById('changeImageBtn');
 
-    out_path = Path(out_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    slug = concept.lower().replace(" ", "_").replace(",", "")[:40]
+                // Control elements
+                this.controlsSection = document.getElementById('controlsSection');
+                this.tileSizeSlider = document.getElementById('tileSizeSlider');
+                this.colorCountSlider = document.getElementById('colorCountSlider');
+                this.minRegionSlider = document.getElementById('minRegionSlider');
+                this.gridLineSlider = document.getElementById('gridLineSlider');
 
-    print(f"[1/4] Generating reference image for '{concept}' ({style})...")
-    reference_img = generate_reference_image(concept, style)
-    reference_img.save(out_path / f"{slug}_reference.png")
+                // Processing elements
+                this.processingSection = document.getElementById('processingSection');
+                this.progressFill = document.getElementById('progressFill');
+                this.progressText = document.getElementById('progressText');
 
-    print(f"[2/4] Generating line art coloring page...")
-    lineart_img = generate_lineart_image(concept, style)
-    coloring_page = add_corner_thumbnail(lineart_img, reference_img)
-    coloring_page.save(out_path / f"{slug}_coloring_page.png")
+                // Results elements
+                this.resultsSection = document.getElementById('resultsSection');
+                this.templateCanvas = document.getElementById('templateCanvas');
+                this.coloredCanvas = document.getElementById('coloredCanvas');
+                this.colorLegend = document.getElementById('colorLegend');
 
-    print(f"[3/4] Building color-by-number overlay ({k_colors} colors)...")
-    numbered_img, palette = build_color_by_number(lineart_img, reference_img, k=k_colors)
-    numbered_with_ref = add_corner_thumbnail(numbered_img, reference_img)
-    numbered_with_ref.save(out_path / f"{slug}_color_by_number.png")
+                // Control buttons
+                this.processBtn = document.getElementById('processBtn');
 
-    print(f"[4/4] Building palette legend...")
-    legend = build_palette_legend(palette)
-    legend.save(out_path / f"{slug}_palette_legend.png")
+                // Download buttons
+                this.downloadTemplate = document.getElementById('downloadTemplate');
+                this.downloadColored = document.getElementById('downloadColored');
+                this.downloadLegend = document.getElementById('downloadLegend');
+                this.downloadAll = document.getElementById('downloadAll');
+            }
 
-    print(f"Done. Files saved to {out_path.resolve()}")
-    return {
-        "reference": out_path / f"{slug}_reference.png",
-        "coloring_page": out_path / f"{slug}_coloring_page.png",
-        "color_by_number": out_path / f"{slug}_color_by_number.png",
-        "palette_legend": out_path / f"{slug}_palette_legend.png",
-    }
+            setupEventListeners() {
+                // Upload listeners
+                this.uploadArea.addEventListener('click', () => this.imageInput.click());
+                this.uploadArea.addEventListener('dragover', this.handleDragOver.bind(this));
+                this.uploadArea.addEventListener('dragleave', this.handleDragLeave.bind(this));
+                this.uploadArea.addEventListener('drop', this.handleDrop.bind(this));
+                this.imageInput.addEventListener('change', this.handleImageUpload.bind(this));
+                this.changeImageBtn.addEventListener('click', () => this.imageInput.click());
 
+                // Control listeners
+                this.tileSizeSlider.addEventListener('input', this.updateSliderValues.bind(this));
+                this.colorCountSlider.addEventListener('input', this.updateSliderValues.bind(this));
+                this.minRegionSlider.addEventListener('input', this.updateSliderValues.bind(this));
+                this.gridLineSlider.addEventListener('input', this.updateSliderValues.bind(this));
 
-# ---------------------------------------------------------------------------
-# 6. CLI
-# ---------------------------------------------------------------------------
+                // Process button
+                this.processBtn.addEventListener('click', this.processImage.bind(this));
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate a coloring-book page set for one creature.")
-    parser.add_argument("--name", required=True, help="Creature concept, e.g. 'round fire lizard, big ears'")
-    parser.add_argument("--style", required=True, choices=VALID_STYLES)
-    parser.add_argument("--out", default="./output", help="Output directory")
-    parser.add_argument("--colors", type=int, default=12, help="Number of colors for color-by-number")
-    args = parser.parse_args()
+                // Download buttons
+                this.downloadTemplate.addEventListener('click', () => this.downloadCanvas(this.templateCanvas, 'template'));
+                this.downloadColored.addEventListener('click', () => this.downloadCanvas(this.coloredCanvas, 'colored-reference'));
+                this.downloadLegend.addEventListener('click', this.downloadLegendImage.bind(this));
+                this.downloadAll.addEventListener('click', this.downloadAllFiles.bind(this));
+            }
 
-    generate_page_set(args.name, args.style, args.out, k_colors=args.colors)
+            updateSliderValues() {
+                this.settings.tileSize = parseInt(this.tileSizeSlider.value);
+                this.settings.colorCount = parseInt(this.colorCountSlider.value);
+                this.settings.minRegionSize = parseInt(this.minRegionSlider.value);
+                this.settings.gridLineThickness = parseInt(this.gridLineSlider.value);
 
+                document.getElementById('tileSizeValue').textContent = this.settings.tileSize;
+                document.getElementById('colorCountValue').textContent = this.settings.colorCount;
+                document.getElementById('minRegionValue').textContent = this.settings.minRegionSize;
+                document.getElementById('gridLineValue').textContent = this.settings.gridLineThickness;
+            }
 
-if __name__ == "__main__":
-    main()
+            handleDragOver(e) {
+                e.preventDefault();
+                this.uploadArea.classList.add('dragover');
+            }
+
+            handleDragLeave(e) {
+                e.preventDefault();
+                this.uploadArea.classList.remove('dragover');
+            }
+
+            handleDrop(e) {
+                e.preventDefault();
+                this.uploadArea.classList.remove('dragover');
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    this.handleImageFile(files[0]);
+                }
+            }
+
+            handleImageUpload(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    this.handleImageFile(file);
+                }
+            }
+
+            handleImageFile(file) {
+                if (!file.type.startsWith('image/')) {
+                    alert('Please select an image file.');
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        this.originalImage = img;
+                        this.previewImg.src = e.target.result;
+                        this.imagePreview.classList.remove('hidden');
+                        this.controlsSection.classList.remove('hidden');
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+
+            async processImage() {
+                if (!this.originalImage) return;
+
+                this.showProcessing();
+
+                try {
+                    // Create working canvas
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+
+                    // Calculate dimensions
+                    const maxSize = 800;
+                    let { width, height } = this.originalImage;
+
+                    if (width > maxSize || height > maxSize) {
+                        const ratio = Math.min(maxSize / width, maxSize / height);
+                        width *= ratio;
+                        height *= ratio;
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+
+                    // Draw and get image data
+                    ctx.drawImage(this.originalImage, 0, 0, width, height);
+                    const imageData = ctx.getImageData(0, 0, width, height);
+
+                    // Update progress
+                    this.updateProgress(20, "Creating mosaic tiles...");
+
+                    // Create mosaic
+                    const mosaicData = this.createMosaic(imageData, width, height);
+
+                    this.updateProgress(50, "Reducing colors...");
+
+                    // Apply K-means clustering
+                    const { clusters, palette } = this.kmeansClustering(mosaicData, this.settings.colorCount);
+                    this.colorPalette = palette;
+
+                    this.updateProgress(80, "Generating templates...");
+
+                    // Create templates
+                    this.mosaicData = { tiles: clusters, width: Math.floor(width / this.settings.tileSize), height: Math.floor(height / this.settings.tileSize) };
+                    this.generateTemplates();
+
+                    this.updateProgress(100, "Complete!");
+
+                    setTimeout(() => {
+                        this.showResults();
+                    }, 500);
+
+                } catch (error) {
+                    console.error('Processing error:', error);
+                    alert('Error processing image. Please try again.');
+                    this.hideProcessing();
+                }
+            }
+
+            createMosaic(imageData, width, height) {
+                const tiles = [];
+                const tileSize = this.settings.tileSize;
+
+                for (let y = 0; y < height - tileSize; y += tileSize) {
+                    for (let x = 0; x < width - tileSize; x += tileSize) {
+                        let r = 0, g = 0, b = 0, count = 0;
+
+                        // Calculate average color for tile
+                        for (let dy = 0; dy < tileSize; dy++) {
+                            for (let dx = 0; dx < tileSize; dx++) {
+                                const pixelIndex = ((y + dy) * width + (x + dx)) * 4;
+                                r += imageData.data[pixelIndex];
+                                g += imageData.data[pixelIndex + 1];
+                                b += imageData.data[pixelIndex + 2];
+                                count++;
+                            }
+                        }
+
+                        tiles.push({
+                            r: Math.round(r / count),
+                            g: Math.round(g / count),
+                            b: Math.round(b / count),
+                            x: Math.floor(x / tileSize),
+                            y: Math.floor(y / tileSize)
+                        });
+                    }
+                }
+
+                return tiles;
+            }
+
+            kmeansClustering(data, k) {
+                // Initialize random centers
+                let centers = [];
+                for (let i = 0; i < k; i++) {
+                    const randomTile = data[Math.floor(Math.random() * data.length)];
+                    centers.push({ r: randomTile.r, g: randomTile.g, b: randomTile.b });
+                }
+
+                let clusters = new Array(data.length);
+                let iterations = 0;
+                const maxIterations = 20;
+
+                while (iterations < maxIterations) {
+                    // Assign each point to nearest cluster
+                    let changed = false;
+                    for (let i = 0; i < data.length; i++) {
+                        let minDist = Infinity;
+                        let bestCluster = 0;
+
+                        for (let j = 0; j < k; j++) {
+                            const dist = this.colorDistance(data[i], centers[j]);
+                            if (dist < minDist) {
+                                minDist = dist;
+                                bestCluster = j;
+                            }
+                        }
+
+                        if (clusters[i] !== bestCluster) {
+                            changed = true;
+                            clusters[i] = bestCluster;
+                        }
+                    }
+
+                    if (!changed) break;
+
+                    // Update centers
+                    const newCenters = new Array(k).fill().map(() => ({ r: 0, g: 0, b: 0, count: 0 }));
+
+                    for (let i = 0; i < data.length; i++) {
+                        const cluster = clusters[i];
+                        newCenters[cluster].r += data[i].r;
+                        newCenters[cluster].g += data[i].g;
+                        newCenters[cluster].b += data[i].b;
+                        newCenters[cluster].count++;
+                    }
+
+                    for (let i = 0; i < k; i++) {
+                        if (newCenters[i].count > 0) {
+                            centers[i] = {
+                                r: Math.round(newCenters[i].r / newCenters[i].count),
+                                g: Math.round(newCenters[i].g / newCenters[i].count),
+                                b: Math.round(newCenters[i].b / newCenters[i].count)
+                            };
+                        }
+                    }
+
+                    iterations++;
+                }
+
+                return { clusters, palette: centers };
+            }
+
+            colorDistance(c1, c2) {
+                return Math.sqrt(
+                    Math.pow(c1.r - c2.r, 2) +
+                    Math.pow(c1.g - c2.g, 2) +
+                    Math.pow(c1.b - c2.b, 2)
+                );
+            }
+
+            generateTemplates() {
+                const { tiles, width, height } = this.mosaicData;
+                const tileSize = 40; // Display tile size
+                const lineWidth = this.settings.gridLineThickness;
+
+                // Template canvas (numbers only)
+                this.templateCanvas.width = width * tileSize;
+                this.templateCanvas.height = height * tileSize;
+                const templateCtx = this.templateCanvas.getContext('2d');
+
+                // Colored canvas (reference)
+                this.coloredCanvas.width = width * tileSize;
+                this.coloredCanvas.height = height * tileSize;
+                const coloredCtx = this.coloredCanvas.getContext('2d');
+
+                // Fill backgrounds
+                templateCtx.fillStyle = 'white';
+                templateCtx.fillRect(0, 0, this.templateCanvas.width, this.templateCanvas.height);
+
+                coloredCtx.fillStyle = 'white';
+                coloredCtx.fillRect(0, 0, this.coloredCanvas.width, this.coloredCanvas.height);
+
+                // Draw tiles
+                for (let i = 0; i < tiles.length; i++) {
+                    const tileData = this.getMosaicTileData(i);
+                    const x = tileData.x * tileSize;
+                    const y = tileData.y * tileSize;
+                    const colorIndex = tiles[i];
+                    const color = this.colorPalette[colorIndex];
+
+                    // Template canvas - numbers only
+                    templateCtx.fillStyle = 'white';
+                    templateCtx.fillRect(x + lineWidth, y + lineWidth, tileSize - lineWidth * 2, tileSize - lineWidth * 2);
+
+                    templateCtx.fillStyle = 'black';
+                    templateCtx.font = `${Math.floor(tileSize * 0.4)}px Arial`;
+                    templateCtx.textAlign = 'center';
+                    templateCtx.textBaseline = 'middle';
+                    templateCtx.fillText(colorIndex + 1, x + tileSize / 2, y + tileSize / 2);
+
+                    // Colored canvas - actual colors
+                    coloredCtx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+                    coloredCtx.fillRect(x + lineWidth, y + lineWidth, tileSize - lineWidth * 2, tileSize - lineWidth * 2);
+
+                    // Grid lines
+                    if (lineWidth > 0) {
+                        templateCtx.strokeStyle = 'black';
+                        templateCtx.lineWidth = lineWidth;
+                        templateCtx.strokeRect(x, y, tileSize, tileSize);
+
+                        coloredCtx.strokeStyle = 'black';
+                        coloredCtx.lineWidth = lineWidth;
+                        coloredCtx.strokeRect(x, y, tileSize, tileSize);
+                    }
+                }
+
+                this.generateColorLegend();
+            }
+
+            getMosaicTileData(index) {
+                const { width } = this.mosaicData;
+                return {
+                    x: index % width,
+                    y: Math.floor(index / width)
+                };
+            }
+
+            generateColorLegend() {
+                this.colorLegend.innerHTML = '';
+
+                this.colorPalette.forEach((color, index) => {
+                    const item = document.createElement('div');
+                    item.className = 'color-item';
+
+                    const swatch = document.createElement('div');
+                    swatch.className = 'color-swatch';
+                    swatch.style.backgroundColor = `rgb(${color.r}, ${color.g}, ${color.b})`;
+
+                    const label = document.createElement('span');
+                    label.textContent = `${index + 1}`;
+                    label.style.fontWeight = 'bold';
+                    label.style.fontSize = '18px';
+
+                    item.appendChild(swatch);
+                    item.appendChild(label);
+                    this.colorLegend.appendChild(item);
+                });
+            }
+
+            downloadCanvas(canvas, filename) {
+                const link = document.createElement('a');
+                link.download = `${filename}.png`;
+                link.href = canvas.toDataURL();
+                link.click();
+            }
+
+            downloadLegendImage() {
+                // Create a canvas for the legend
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+
+                const itemWidth = 150;
+                const itemHeight = 60;
+                const cols = Math.min(4, this.colorPalette.length);
+                const rows = Math.ceil(this.colorPalette.length / cols);
+
+                canvas.width = cols * itemWidth + 40;
+                canvas.height = rows * itemHeight + 80;
+
+                // Background
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Title
+                ctx.fillStyle = 'black';
+                ctx.font = '24px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('Color Guide', canvas.width / 2, 30);
+
+                // Draw color items
+                this.colorPalette.forEach((color, index) => {
+                    const col = index % cols;
+                    const row = Math.floor(index / cols);
+                    const x = col * itemWidth + 20;
+                    const y = row * itemHeight + 60;
+
+                    // Color swatch
+                    ctx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+                    ctx.fillRect(x, y, 40, 40);
+                    ctx.strokeStyle = 'black';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, 40, 40);
+
+                    // Number
+                    ctx.fillStyle = 'black';
+                    ctx.font = '20px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(`${index + 1}`, x + 50, y + 25);
+                });
+
+                this.downloadCanvas(canvas, 'color-guide');
+            }
+
+            async downloadAllFiles() {
+                // Download all three files
+                this.downloadCanvas(this.templateCanvas, 'color-by-number-template');
+                setTimeout(() => {
+                    this.downloadCanvas(this.coloredCanvas, 'color-reference');
+                }, 500);
+                setTimeout(() => {
+                    this.downloadLegendImage();
+                }, 1000);
+            }
+
+            showProcessing() {
+                this.processingSection.classList.remove('hidden');
+                this.resultsSection.classList.add('hidden');
+            }
+
+            hideProcessing() {
+                this.processingSection.classList.add('hidden');
+            }
+
+            showResults() {
+                this.hideProcessing();
+                this.resultsSection.classList.remove('hidden');
+            }
+
+            updateProgress(percent, text) {
+                this.progressFill.style.width = percent + '%';
+                this.progressText.textContent = text;
+            }
+        }
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new ColorByNumberGenerator();
+        });
+    </script>
+</body>
+</html>
