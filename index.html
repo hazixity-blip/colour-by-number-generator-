@@ -1,0 +1,358 @@
+"""
+Coloring Book Generator for Amazon KDP
+========================================
+Generates, for any ORIGINAL creature/animal concept you name, a 3-page set:
+
+  1. reference.png     - full-color reference image (small "answer key" thumbnail)
+  2. coloring_page.png - clean black-and-white line art, ready to color
+  3. color_by_number.png - line art with numbered regions + a color-key legend
+
+Supports three styles: "cute", "standard", "pixel".
+
+IMPORTANT / LEGAL NOTE
+-----------------------
+Do NOT pass in copyrighted characters (Pokemon, Disney, etc.) — this tool is
+built for ORIGINAL creature concepts you invent (e.g. "round fire lizard with
+big ears") or real, non-trademarked animals (e.g. "axolotl", "capybara").
+Generating and selling images of existing copyrighted characters is
+infringement regardless of how the image was produced.
+
+Setup
+-----
+    pip install openai pillow numpy scikit-learn
+    export OPENAI_API_KEY="sk-..."
+
+Usage
+-----
+    python coloring_book_gen.py --name "round fire lizard, big ears, chubby tail" \
+                                 --style cute --out ./output
+
+    # or import and call generate_page_set() directly, e.g. in a loop over
+    # a CSV of 50 creature concepts to batch-produce a whole book.
+"""
+
+import argparse
+import base64
+import io
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from sklearn.cluster import KMeans
+
+# ---------------------------------------------------------------------------
+# 1. STYLE PROMPTS
+# ---------------------------------------------------------------------------
+# Each style has a "reference" prompt (full color) and a "lineart" prompt
+# (pure black-and-white outline, print-ready). Keeping these separate and
+# asking the model for line art DIRECTLY gives far cleaner, closed outlines
+# than trying to edge-detect a photo-real image after the fact.
+
+STYLE_PROMPTS = {
+    "cute": {
+        "reference": (
+            "A single adorable chibi-style creature: {concept}. Big round eyes, "
+            "soft rounded body, kawaii mascot style, simple flat colors, "
+            "centered on a plain white background, full body visible, "
+            "children's book illustration style, no text, no watermark."
+        ),
+        "lineart": (
+            "Black and white line art coloring book page of a single adorable "
+            "chibi-style creature: {concept}. Big round eyes, soft rounded body, "
+            "kawaii mascot style. THICK bold clean outlines only, no shading, "
+            "no gray fill, no color, pure white background, all lines closed "
+            "and connected, centered, full body visible, simple enough for a "
+            "child to color, no text, no watermark."
+        ),
+    },
+    "standard": {
+        "reference": (
+            "A single creature illustrated in a natural, semi-realistic "
+            "children's-encyclopedia style: {concept}. Balanced proportions, "
+            "detailed but clean, standing pose, centered on a plain white "
+            "background, full body visible, no text, no watermark."
+        ),
+        "lineart": (
+            "Black and white line art coloring book page, semi-realistic "
+            "encyclopedia illustration style, of a single creature: {concept}. "
+            "Clean medium-weight outlines, moderate detail (texture lines for "
+            "fur/scales/feathers where relevant), no shading, no gray fill, "
+            "no color, pure white background, all lines closed and connected, "
+            "centered, full body visible, no text, no watermark."
+        ),
+    },
+    "pixel": {
+        "reference": (
+            "A single creature in 16-bit retro pixel art style: {concept}. "
+            "Crisp pixel blocks, limited retro color palette, centered on a "
+            "plain white background, full sprite visible, no anti-aliasing "
+            "blur, no text, no watermark."
+        ),
+        "lineart": (
+            "Black and white pixel-grid coloring book page of a single "
+            "creature in 16-bit retro pixel art style: {concept}. Each pixel "
+            "block outlined with bold black borders (like a pixel-art "
+            "cross-stitch pattern), no shading, no gray fill, no color, pure "
+            "white background, centered, full sprite visible, no text, no "
+            "watermark."
+        ),
+    },
+}
+
+VALID_STYLES = tuple(STYLE_PROMPTS.keys())
+
+
+# ---------------------------------------------------------------------------
+# 2. IMAGE GENERATION (OpenAI gpt-image-1)
+# ---------------------------------------------------------------------------
+
+def _get_openai_client():
+    """Lazy import so the rest of the script (line-art processing, etc.)
+    can be tested/used without the openai package installed."""
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise ImportError(
+            "The 'openai' package is required for image generation. "
+            "Install it with: pip install openai"
+        ) from e
+    return OpenAI()  # reads OPENAI_API_KEY from env
+
+
+def generate_image(prompt: str, size: str = "1024x1024") -> Image.Image:
+    """Calls the OpenAI image API and returns a PIL Image."""
+    client = _get_openai_client()
+    result = client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        size=size,
+        n=1,
+    )
+    image_b64 = result.data[0].b64_json
+    image_bytes = base64.b64decode(image_b64)
+    return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+
+def generate_reference_image(concept: str, style: str) -> Image.Image:
+    prompt = STYLE_PROMPTS[style]["reference"].format(concept=concept)
+    return generate_image(prompt)
+
+
+def generate_lineart_image(concept: str, style: str) -> Image.Image:
+    prompt = STYLE_PROMPTS[style]["lineart"].format(concept=concept)
+    return generate_image(prompt)
+
+
+# ---------------------------------------------------------------------------
+# 3. COLOR-BY-NUMBER GENERATION
+# ---------------------------------------------------------------------------
+# Strategy: quantize the REFERENCE image's colors into K clusters with
+# k-means, then for each region of the LINE ART (flood-filled by the
+# nearest-cluster color at that pixel location, scaled to line-art size),
+# stamp a number in the region centroid. This keeps the "answer" colors
+# tied to the actual reference art rather than guessing.
+
+@dataclass
+class PaletteEntry:
+    number: int
+    rgb: tuple
+
+
+def quantize_palette(reference_img: Image.Image, k: int = 12) -> tuple:
+    """Returns (label_grid, palette) where label_grid is a 2D array of
+    cluster indices matching reference_img's pixel grid (downsampled for
+    speed), and palette is a list of PaletteEntry."""
+    small = reference_img.resize((256, 256))
+    arr = np.array(small).reshape(-1, 3)
+
+    km = KMeans(n_clusters=k, n_init=4, random_state=42)
+    labels = km.fit_predict(arr)
+    centers = km.cluster_centers_.astype(int)
+
+    label_grid = labels.reshape(256, 256)
+    palette = [PaletteEntry(number=i + 1, rgb=tuple(centers[i])) for i in range(k)]
+    return label_grid, palette
+
+
+def _region_centroids(label_grid: np.ndarray, k: int, min_area: int = 60):
+    """For each cluster label, find connected-component centroids big
+    enough to hold a number (using scikit-image so a color that appears in
+    multiple separate body parts gets a number in each part)."""
+    from skimage import measure
+
+    centroids_by_label = {}
+    for label_id in range(k):
+        mask = (label_grid == label_id).astype(np.uint8)
+        labeled_regions = measure.label(mask, connectivity=2)
+        spots = []
+        for region in measure.regionprops(labeled_regions):
+            if region.area >= min_area:
+                cy, cx = region.centroid
+                spots.append((cx, cy))
+        centroids_by_label[label_id] = spots
+    return centroids_by_label
+
+
+def build_color_by_number(
+    lineart_img: Image.Image,
+    reference_img: Image.Image,
+    k: int = 12,
+    font_path: str = None,
+) -> Image.Image:
+    """Overlays numbers onto the line art page + returns it. Call
+    build_palette_legend() separately for the printable color key."""
+    label_grid, palette = quantize_palette(reference_img, k=k)
+    centroids_by_label = _region_centroids(label_grid, k)
+
+    canvas = lineart_img.convert("RGB").copy()
+    w, h = canvas.size
+    draw = ImageDraw.Draw(canvas)
+
+    try:
+        font = ImageFont.truetype(font_path or "DejaVuSans-Bold.ttf", 18)
+    except OSError:
+        font = ImageFont.load_default()
+
+    grid_size = label_grid.shape[0]  # 256
+    for label_id, spots in centroids_by_label.items():
+        number = label_id + 1
+        for (cx, cy) in spots:
+            # map from 256x256 grid coords -> full canvas coords
+            px = int(cx / grid_size * w)
+            py = int(cy / grid_size * h)
+            text = str(number)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((px - tw / 2, py - th / 2), text, fill=(0, 0, 0), font=font)
+
+    return canvas, palette
+
+
+def build_palette_legend(palette, swatch_size: int = 40, per_row: int = 4) -> Image.Image:
+    """Small printable legend: number + color swatch, e.g. to print at the
+    bottom of the color-by-number page or on a separate key page."""
+    rows = (len(palette) + per_row - 1) // per_row
+    width = per_row * (swatch_size * 3)
+    height = rows * (swatch_size + 10)
+    legend = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(legend)
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 16)
+    except OSError:
+        font = ImageFont.load_default()
+
+    for entry in palette:
+        idx = entry.number - 1
+        row, col = divmod(idx, per_row)
+        x0 = col * swatch_size * 3
+        y0 = row * (swatch_size + 10)
+        draw.rectangle([x0, y0, x0 + swatch_size, y0 + swatch_size],
+                        fill=entry.rgb, outline="black")
+        draw.text((x0 + swatch_size + 8, y0 + swatch_size // 3),
+                   str(entry.number), fill="black", font=font)
+    return legend
+
+
+# ---------------------------------------------------------------------------
+# 4. CORNER REFERENCE THUMBNAIL (compositing)
+# ---------------------------------------------------------------------------
+
+def add_corner_thumbnail(
+    base_page: Image.Image,
+    reference_img: Image.Image,
+    corner: str = "top-right",
+    scale: float = 0.18,
+    margin: int = 24,
+    border_width: int = 3,
+) -> Image.Image:
+    """Pastes a small full-color reference thumbnail into a corner of the
+    coloring/color-by-number page, with a thin border so it reads clearly
+    against the line art."""
+    page = base_page.convert("RGB").copy()
+    pw, ph = page.size
+    thumb_w = int(pw * scale)
+    thumb_h = int(thumb_w * reference_img.height / reference_img.width)
+
+    thumb = reference_img.resize((thumb_w, thumb_h)).convert("RGB")
+
+    bordered = Image.new(
+        "RGB", (thumb_w + border_width * 2, thumb_h + border_width * 2), "black"
+    )
+    bordered.paste(thumb, (border_width, border_width))
+
+    bw, bh = bordered.size
+    positions = {
+        "top-right": (pw - bw - margin, margin),
+        "top-left": (margin, margin),
+        "bottom-right": (pw - bw - margin, ph - bh - margin),
+        "bottom-left": (margin, ph - bh - margin),
+    }
+    page.paste(bordered, positions[corner])
+    return page
+
+
+# ---------------------------------------------------------------------------
+# 5. FULL PIPELINE
+# ---------------------------------------------------------------------------
+
+def generate_page_set(concept: str, style: str, out_dir: str, k_colors: int = 12):
+    """Generates and saves all deliverables for one creature concept:
+        {slug}_reference.png
+        {slug}_coloring_page.png          (line art, with corner ref thumbnail)
+        {slug}_color_by_number.png        (numbered line art, with corner ref thumbnail)
+        {slug}_palette_legend.png         (color key)
+    """
+    if style not in VALID_STYLES:
+        raise ValueError(f"style must be one of {VALID_STYLES}, got {style!r}")
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    slug = concept.lower().replace(" ", "_").replace(",", "")[:40]
+
+    print(f"[1/4] Generating reference image for '{concept}' ({style})...")
+    reference_img = generate_reference_image(concept, style)
+    reference_img.save(out_path / f"{slug}_reference.png")
+
+    print(f"[2/4] Generating line art coloring page...")
+    lineart_img = generate_lineart_image(concept, style)
+    coloring_page = add_corner_thumbnail(lineart_img, reference_img)
+    coloring_page.save(out_path / f"{slug}_coloring_page.png")
+
+    print(f"[3/4] Building color-by-number overlay ({k_colors} colors)...")
+    numbered_img, palette = build_color_by_number(lineart_img, reference_img, k=k_colors)
+    numbered_with_ref = add_corner_thumbnail(numbered_img, reference_img)
+    numbered_with_ref.save(out_path / f"{slug}_color_by_number.png")
+
+    print(f"[4/4] Building palette legend...")
+    legend = build_palette_legend(palette)
+    legend.save(out_path / f"{slug}_palette_legend.png")
+
+    print(f"Done. Files saved to {out_path.resolve()}")
+    return {
+        "reference": out_path / f"{slug}_reference.png",
+        "coloring_page": out_path / f"{slug}_coloring_page.png",
+        "color_by_number": out_path / f"{slug}_color_by_number.png",
+        "palette_legend": out_path / f"{slug}_palette_legend.png",
+    }
+
+
+# ---------------------------------------------------------------------------
+# 6. CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate a coloring-book page set for one creature.")
+    parser.add_argument("--name", required=True, help="Creature concept, e.g. 'round fire lizard, big ears'")
+    parser.add_argument("--style", required=True, choices=VALID_STYLES)
+    parser.add_argument("--out", default="./output", help="Output directory")
+    parser.add_argument("--colors", type=int, default=12, help="Number of colors for color-by-number")
+    args = parser.parse_args()
+
+    generate_page_set(args.name, args.style, args.out, k_colors=args.colors)
+
+
+if __name__ == "__main__":
+    main()
